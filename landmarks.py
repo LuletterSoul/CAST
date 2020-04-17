@@ -1,0 +1,189 @@
+#!/usr/bin/env python
+# encoding: utf-8
+"""
+@author: Shanda Lau 刘祥德
+@license: (C) Copyright 2019-now, Node Supply Chain Manager Corporation Limited.
+@contact: shandalaulv@gmail.com
+@software: 
+@file: landmarks.py
+@time: 12/17/19 4:40 PM
+@version 1.0
+@desc:
+"""
+# 导入系统库并定义辅助函数
+from pprint import pformat
+import numpy as np
+import threading
+import multiprocessing
+
+# import PythonSDK
+from PythonSDK.facepp import API, File, APIError
+from pathlib import Path
+import os
+import json
+# 导入图片处理类
+import PythonSDK.ImagePro
+
+
+# 此方法专用来打印api返回的信息
+def print_result(hit, result):
+    print(hit)
+    print('\n'.join("  " + i for i in pformat(result, width=75).split('\n')))
+
+
+def printFuctionTitle(title):
+    return "\n" + "-" * 60 + title + "-" * 60;
+
+
+def generate_dense_landmarks(file_lists, output: Path):
+    with multiprocessing.Pool() as p:
+        for f in file_lists:
+            if f.is_dir():
+                output_dir = output / f.name
+                output_dir.mkdir(parents=True, exist_ok=True)
+                imgs = list(f.glob('*.png')) + list(f.glob('*.jpg'))
+                for img in imgs:
+                    # handle_img(img, output_dir)
+                    p.apply_async(handle_img_dense, (img, output_dir,))
+                    # return
+                    # task = threading.Thread(target=handle_img, args=(img, output_dir,))
+                    # task.start()
+                    # threads.append(task)
+            elif f.is_file():
+                p.apply_async(handle_img_dense, (f, output,))
+        p.close()
+        p.join()
+
+        # return
+
+
+def generate_sparse_landmarks(file_lists, output: Path, return_landmark=1):
+    with multiprocessing.Pool() as p:
+        for f in file_lists:
+            if f.is_dir():
+                output_dir = output / f.name
+                output_dir.mkdir(parents=True, exist_ok=True)
+                imgs = list(f.glob('*.png')) + list(f.glob('*.jpg'))
+                for img in imgs:
+                    p.apply_async(handle_img_sparse, (img, output_dir, return_landmark,))
+            elif f.is_file():
+                p.apply_async(handle_img_sparse, (f, output, return_landmark,))
+                # handle_img_sparse(f, output)
+        p.close()
+        p.join()
+
+        # return
+
+
+def handle_img_dense(img, output_dir):
+    not_fetch = True
+    res = None
+    output_landmarks_dir = output_dir / 'landmarks'
+    output_json_dir = output_dir / 'results'
+    output_landmarks_dir.mkdir(exist_ok=True, parents=True)
+    output_json_dir.mkdir(exist_ok=True, parents=True)
+
+    img_name = os.path.splitext(os.path.basename(img))[0]
+    txt_name = img_name + '.txt'
+    txt_posix: Path = output_landmarks_dir / txt_name
+    if txt_posix.exists():
+        print('Exists landmarks file: [{}],skipped...'.format(str(txt_posix)))
+        return
+    while not_fetch:
+        try:
+            res = api.thousandlandmark(image_file=File(img),
+                                       return_landmark="face,left_eyebrow,right_eyebrow,left_eye_eyelid,right_eye_eyelid,nose,mouth")
+            not_fetch = False
+        except APIError as e:
+            if e.code == 403:
+                pass
+            else:
+                print(e)
+                print('Skip: [{}]'.format(str(txt_posix)))
+                return
+
+    if 'face' not in res:
+        return None
+    if 'landmark' not in res['face']:
+        return None
+    landmarks = res['face']['landmark']
+    landmarks_list = []
+    print(img)
+    # print_result(printFuctionTitle("人脸关键点检测"), landmarks)
+    for region, landmarks_dict in landmarks.items():
+        for k, landmark in landmarks_dict.items():
+            landmarks_list.append([landmark['x'], landmark['y']])
+    # landmarks_list = np.array(landmarks_list)
+    # img_name = os.path.splitext(os.path.basename(img))[0]
+    # txt_name = img_name + '.txt'
+    np.savetxt(str(txt_posix), landmarks_list, fmt="%d")
+    output_json = output_json_dir / (img_name + '.json')
+    fw = open(output_json, 'w')
+    fw.write(json.dumps(res, indent=4))
+    fw.close()
+
+
+def handle_img_sparse(img, output_dir, return_landmark=1):
+    not_fetch = True
+    res = None
+    output_landmarks_dir = output_dir / 'landmarks'
+    output_json_dir = output_dir / 'results'
+    output_landmarks_dir.mkdir(exist_ok=True, parents=True)
+    output_json_dir.mkdir(exist_ok=True, parents=True)
+
+    img_name = os.path.splitext(os.path.basename(img))[0]
+    txt_name = img_name + '.txt'
+    txt_posix: Path = output_landmarks_dir / txt_name
+    if txt_posix.exists():
+        print('Exists landmarks file: [{}],skipped...'.format(str(txt_posix)))
+        return
+    while not_fetch:
+        try:
+            res = api.detect(image_file=File(img),
+                             return_landmark=return_landmark, return_attributes=None)
+            not_fetch = False
+            # print(res)
+        except APIError as e:
+            if e.code == 403:
+                pass
+            else:
+                print(e)
+                print('Skip: [{}]'.format(str(txt_posix)))
+                return
+
+    if 'faces' not in res:
+        return None
+    if 'landmark' not in res['faces'][0]:
+        return None
+    landmarks = res['faces'][0]['landmark']
+    landmarks_list = []
+    print(img)
+    # print_result(printFuctionTitle("人脸关键点检测"), landmarks)
+    # for region, landmarks_dict in landmarks.items():
+    for k, landmark in landmarks.items():
+        landmarks_list.append([landmark['x'], landmark['y']])
+    np.savetxt(str(txt_posix), landmarks_list, fmt="%d")
+
+    output_json = output_json_dir / (img_name + '.json')
+    fw = open(output_json, 'w')
+    fw.write(json.dumps(res, indent=4))
+    fw.close()
+
+
+# 初始化对象，进行api的调用工作
+api = API()
+
+dataset_name = 'CelebA'
+output_name = 'CelebA-landmarks-106'
+# dataset_name = 'AF_dataset'
+# output_name = 'AF-landmarks-83'
+dataset = Path(dataset_name)
+
+output = Path(output_name)
+output.mkdir(parents=True, exist_ok=True)
+
+file_lists = list(dataset.glob('*'))
+
+# generate_dense_landmarks(file_lists, output)
+generate_sparse_landmarks(file_lists, output,2)
+
