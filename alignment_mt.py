@@ -12,12 +12,12 @@ from pathlib import Path
 
 num_of_points = 17
 time_enlarge = 1.4
-resize_w = 256
-resize_h = 256
+resize_w = 512
+resize_h = 512
 path_data = 'datasets/WebCaricature'
-path_output = f'datasets/WebCaricature_align_{time_enlarge}_256_bmp/'
+path_output = f'datasets/WebCaricature_align_{time_enlarge}_512_jpg/'
 
-landmarks_data = 'datasets/WebCari/landmarks/128'
+landmarks_data = 'datasets/WebCari/landmarks/845'
 
 path_images = os.path.join(path_data, 'OriginalImages')
 path_points = os.path.join(path_data, 'FacialPoints')

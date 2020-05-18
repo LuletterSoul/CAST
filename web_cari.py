@@ -17,6 +17,7 @@ from pathlib import Path
 from random import sample
 
 import cv2
+import shutil
 import numpy as np
 import torch
 
@@ -105,7 +106,8 @@ def cat_from_two_times(input_dir: Path, web_cari_img: Path, random_train_nums, s
 
 def warp_ablation2(web_cari_path: Path, random_train_nums, test_times, device_id
                    , landmarks_num, warped_output, cmp_output, record_output, scale=-1, scale_to_old=False,
-                   rollback=False, random_sample_times=1, fmt='.jpg', draw_pts=False):
+                   rollback=False, random_sample_times=1, fmt='.jpg', draw_pts=False, train_face_scale=1,
+                   train_cari_scale=1, test_scale=1):
     """
     :param web_cari_path:
     :param random_train_nums:
@@ -184,6 +186,8 @@ def warp_ablation2(web_cari_path: Path, random_train_nums, test_times, device_id
         print('Loading face test landmarks.')
         test_face_landmarks, face_test_paths = load_landmarks(face_test_paths, web_cari_landmarks_path)
 
+        test_face_landmarks = test_face_landmarks * test_scale
+
         print('Loading face test landmarks done.')
         face_test_num = len(test_face_landmarks)
         test_fl_tensor = cvt_landmarks_distribution(device, face_test_num, test_face_landmarks)
@@ -201,6 +205,9 @@ def warp_ablation2(web_cari_path: Path, random_train_nums, test_times, device_id
             print(f'Cari num: {len(cari_path)}')
             train_face_landmarks, face_train_paths = load_landmarks(photo_path, web_cari_landmarks_path)
             cari_landmarks, cari_train_paths = load_landmarks(cari_path, web_cari_landmarks_path)
+
+            train_face_landmarks = train_face_landmarks * train_face_scale
+            cari_landmarks = cari_landmarks * train_cari_scale
 
             # training sample num
             face_train_num = len(train_face_landmarks)
@@ -241,7 +248,7 @@ def warp_ablation2(web_cari_path: Path, random_train_nums, test_times, device_id
                     (
                         test_face_landmarks[idx], test_wct_landmarks[idx], fp, current_epoch_warped_output,
                         current_epoch_cmp_output, scale,
-                        scale_to_old,))
+                        scale_to_old, False, test_scale,))
             # acceleration warping using multiprocessing
             with mp.Pool(mp.cpu_count() - 1) as p:
                 p.starmap(wct_task, pairs)
@@ -632,7 +639,7 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
                   , landmarks_num, warped_output, cmp_output, record_output, compress_face_distribution=False,
                   compress_cari_distribution=False, scale=-1, scale_to_old=False, fmt='.bmp', draw_pts=False,
                   cari_train_path=None,
-                  train_face_scale=1, train_cari_scale=1, test_scale=1):
+                  train_face_scale=1, train_cari_scale=1, test_scale=1, rollback=False, sample_per_person=2):
     """
     :param web_cari_path:
     :param web_cari_test_path:
@@ -652,12 +659,17 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
     web_cari_photo_path = web_cari_path / 'img'
     web_cari_landmarks_path = web_cari_path / 'landmarks' / str(landmarks_num)
     photo_paths = list(web_cari_photo_path.glob(f'*/P*{fmt}'))
+
     if cari_train_path is None:
         cari_paths = list(web_cari_photo_path.glob(f'*/C*{fmt}'))
     else:
         cari_train_photo_path = cari_train_path / 'img'
         cari_train_landmarks_path = cari_train_path / 'landmarks'
         cari_paths = list(cari_train_photo_path.glob(f'*'))
+        if compress_cari_distribution:
+            if train_cari_num <= len(cari_paths):
+                cari_paths = sample(cari_paths, train_cari_num)
+                print(cari_paths)
 
     # shuffles the datasets
     np.random.shuffle(photo_paths)
@@ -667,24 +679,41 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
     print(f'Cari num {len(cari_paths)}')
 
     # loads face training landmarks
-    print('Loading face training landmarks.')
-    face_landmarks, face_paths = load_landmarks(photo_paths, web_cari_landmarks_path)
-    print('Loading face training landmarks done.')
 
     if web_cari_test_path is None:
+        print('Loading face training landmarks.')
+        face_landmarks, face_paths = load_landmarks(photo_paths, web_cari_landmarks_path)
+        print('Loading face training landmarks done.')
         face_train_paths, face_test_paths, train_face_landmarks, test_face_landmarks, = split_datasets(face_landmarks,
                                                                                                        face_paths,
                                                                                                        train_face_num)
     else:
+        face_test_names = os.listdir(str(web_cari_test_path / 'img'))
+        face_names = os.listdir(str(web_cari_path / 'img'))
+        face_names = [n for n in face_names if n not in face_test_names]
+        face_train_paths = []
         if compress_face_distribution:
-            face_train_paths = face_paths[:train_face_num]
-            train_face_landmarks = face_landmarks[:train_face_num]
+            face_train_paths = sample_normal_distribution(face_names, sample_per_person, train_face_num, web_cari_path)
         else:
-            face_train_paths = face_paths
-            train_face_landmarks = face_landmarks
+            for fn in face_names:
+                face_train_paths.extend(list((web_cari_path / 'img' / fn).glob('P*')))
+
+        # print(len(face_test_names))
+        # supply_names = sample(face_names, half - len(face_test_names))
+        # for spn in supply_names:
+        #     shutil.copytree(web_cari_path / 'img' / spn, web_cari_test_path / 'img' / spn, dirs_exist_ok=True)
+        #     shutil.copytree(web_cari_path / 'landmarks' / str(landmarks_num) / spn,
+        #                     web_cari_test_path / 'landmarks' / str(landmarks_num) / spn, dirs_exist_ok=True)
         face_test_paths = list(web_cari_test_path.glob(f'*/*/P*{fmt}'))
         web_cari_test_landmarks_path = web_cari_test_path / 'landmarks' / str(landmarks_num)
         test_face_landmarks, face_test_paths = load_landmarks(face_test_paths, web_cari_test_landmarks_path)
+        # fact_test_str_paths = [os.path.join(str(p).split('/')[-2], str(p).split('/')[-1]) for p in face_test_paths]
+        # face_train_paths = [p for p in photo_paths if
+        #                     os.path.join(str(p).split('/')[-2], str(p).split('/')[-1]) not in fact_test_str_paths]
+        # if compress_face_distribution:
+        #     face_train_paths = sample(face_train_paths, train_face_num) if len(
+        #         face_train_paths) <= train_cari_num else face_train_paths
+        train_face_landmarks, face_train_paths = load_landmarks(face_train_paths, web_cari_landmarks_path)
 
     # loads face test landmarks
     # print('Loading face test landmarks.')
@@ -694,13 +723,16 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
     # loads cari training landmarks
     print('Loading cari training landmarks.')
     if cari_train_path is None:
+        if compress_cari_distribution:
+            face_test_names = os.listdir(str(web_cari_test_path / 'img'))
+            face_names = os.listdir(str(web_cari_path / 'img'))
+            face_names = [n for n in face_names if n not in face_test_names]
+            # cari_paths = sample(cari_paths, train_cari_num)
+            cari_paths = sample_normal_distribution(face_names, sample_per_person, train_cari_num, web_cari_path,
+                                                    fmt='C*')
         cari_landmarks, cari_paths = load_landmarks(cari_paths, web_cari_landmarks_path)
     else:
         cari_landmarks, cari_paths = load_landmarks_from_single_path(cari_paths, cari_train_landmarks_path)
-
-    if compress_cari_distribution:
-        cari_landmarks = cari_landmarks[:train_cari_num]
-        cari_paths = cari_paths[:train_cari_num]
 
     with open(f'{record_output}/train_face_samples.txt', 'w') as fw:
         for path in face_train_paths:
@@ -711,6 +743,15 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
     # loads cari training landmarks
     print('Loading cari training landmarks done.')
 
+    if rollback:
+        tfs = f'{record_output}/train_face_samples.txt'
+        if os.path.exists(tfs):
+            with open(tfs, 'r') as f:
+                face_train_paths = [Path(path.replace('\n', '')) for path in f.readlines()]
+                train_face_landmarks, face_train_paths = load_landmarks(face_train_paths, web_cari_landmarks_path)
+            with open(f'{record_output}/train_cari_samples.txt', 'r') as f:
+                cari_paths = [Path(path.replace('\n', '')) for path in f.readlines()]
+                cari_landmarks, cari_paths = load_landmarks(cari_paths, web_cari_landmarks_path)
     # training sample num
     face_train_num = len(train_face_landmarks)
     face_test_num = len(test_face_landmarks)
@@ -760,6 +801,24 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
         p.starmap(wct_task, pairs)
 
 
+def sample_normal_distribution(names, sample_per_person, k, web_cari_path, fmt='P*'):
+    paths = []
+    photos_of_person = {}
+    for fn in names:
+        photos_of_person[fn] = list((web_cari_path / 'img' / fn).glob(fmt))
+    while len(paths) < k:
+        for fn in names:
+            if sample_per_person <= len(photos_of_person[fn]):
+                current_samples = sample(photos_of_person[fn], sample_per_person)
+                paths.extend(current_samples)
+                photos_of_person[fn] = [p for p in photos_of_person[fn] if p not in current_samples]
+            else:
+                paths.extend(photos_of_person[fn])
+            if len(paths) >= k:
+                break
+    return paths
+
+
 def split_datasets(face_landmarks, face_paths, split):
     face_train_paths = face_paths[:-split]
     face_test_paths = face_paths[-split:]
@@ -768,9 +827,9 @@ def split_datasets(face_landmarks, face_paths, split):
     return face_train_paths, face_test_paths, train_face_landmarks, test_face_landmarks
 
 
-def warp_articst_faces(cari_train_path: Path, cari_test_path: Path, articts_photo_path: Path,
+def warp_articst_faces(cari_train_path: Path, cari_test_path: Path, articts_photo_path: Path, train_face_num,
                        articts_cari_landmarks_path: Path, device_id
-                       , landmarks_num, warped_output, cmp_output):
+                       , landmarks_num, warped_output, cmp_output, articts_scale=2):
     """
     :param cari_train_path: 
     :param cari_test_path: 
@@ -798,15 +857,15 @@ def warp_articst_faces(cari_train_path: Path, cari_test_path: Path, articts_phot
     train_face_paths = list(web_cari_photo_path.glob('*/P*'))
     face_test_paths = list(web_test_photo_path.glob('*/P*'))
 
-    cari_paths = list(articts_photo_path.glob('*.png'))
-
+    train_face_paths = sample(train_face_paths, train_face_num)
     # shuffles the datasets
     np.random.shuffle(train_face_paths)
-
     # loads face training landmarks
     print('Loading face training landmarks.')
     train_face_landmarks, train_face_paths = load_landmarks(train_face_paths, web_cari_train_landmarks_path)
     print('Loading face training landmarks done.')
+
+    cari_paths = list(articts_photo_path.glob('*.png'))
 
     print('Loading face test landmarks.')
     test_face_landmarks, face_test_paths = load_landmarks(face_test_paths, web_cari_test_landmarks_path)
@@ -832,7 +891,7 @@ def warp_articst_faces(cari_train_path: Path, cari_test_path: Path, articts_phot
 
     # convert to tensors, dim is N * (d*2).
     fl_tensor = cvt_landmarks_distribution(device, face_train_num, train_face_landmarks)
-    cl_tensor = cvt_landmarks_distribution(device, cari_train_num, cari_landmarks)
+    cl_tensor = cvt_landmarks_distribution(device, cari_train_num, cari_landmarks) * articts_scale
     test_fl_tensor = cvt_landmarks_distribution(device, face_test_num, test_face_landmarks)
 
     start = time.time()
@@ -855,7 +914,7 @@ def warp_articst_faces(cari_train_path: Path, cari_test_path: Path, articts_phot
     pairs = []
     for idx, fp in enumerate(face_test_paths):
         pairs.append(
-            (test_face_landmarks[idx], test_wct_landmarks[idx], fp, warped_output, cmp_output, scale_to_old,))
+            (test_face_landmarks[idx], test_wct_landmarks[idx], fp, warped_output, cmp_output,))
     # for idx, fp in enumerate(face_train_paths):
     #     pairs.append(
     #         (train_face_landmarks[idx], train_wct_landmarks[idx], fp, warped_output, cmp_output))
@@ -980,8 +1039,8 @@ def wct_task(face_landmark, wct_landmark, fp, warped_output: Path, cmp_output: P
     # stack original image and warpe image with keypoints
     # cmp = np.hstack((photo_kpts, warped_kpts))
 
-    cmp = np.hstack((face, warped))
-    cv2.imwrite(str(cmp_save_path), cmp)
+    # cmp = np.hstack((face, warped))
+    # cv2.imwrite(str(cmp_save_path), cmp)
     cv2.imwrite(warped_path, warped)
     if draw_ktps:
         photo_kpts_path = str(cmp_output / (index + '_pkpts.png'))
@@ -992,6 +1051,70 @@ def wct_task(face_landmark, wct_landmark, fp, warped_output: Path, cmp_output: P
 
 def generate_time_stamp(fmt='%m%d%H%M'):
     return time.strftime(fmt, time.localtime(time.time()))
+
+
+def cat_cmp(paths, original, output: Path, fmt='.jpg'):
+    print(paths[0].exists())
+    names = os.listdir(str(paths[0]))
+    i = 0
+    if not output.exists():
+        output.mkdir(exist_ok=True, parents=True)
+    for n in names:
+        warps = os.listdir(str(paths[0] / n))
+        plots = []
+        for w in warps:
+            op = original / n.replace('_', ' ') / (os.path.splitext(w)[0] + fmt)
+            oi = cv2.imread(str(original / n.replace('_', ' ') / (os.path.splitext(w)[0] + fmt)))
+            # oi = cv2.resize(oi, (0, 0), fx=2, fy=2)
+            h_plots = [oi,
+                       cv2.imread(str(paths[0] / n / w))]
+            for rp in paths[1:]:
+                h_plots.append(cv2.imread(str(rp / n / w)))
+            h_plots = np.hstack(h_plots)
+            plots.append(h_plots)
+            if (i + 1) % 10 == 0:
+                plots = np.vstack(plots)
+                output_name = output / n
+                output_name.mkdir(exist_ok=True, parents=True)
+                cv2.imwrite(str(output_name / f'{str(i)}.png'), plots)
+                plots = []
+            i += 1
+
+
+def cat_art(path, original, person_names, arts: Path, output: Path, fmt='.jpg'):
+    # names = os.listdir(str(paths[0]))
+    i = 0
+    if not output.exists():
+        output.mkdir(exist_ok=True, parents=True)
+    art_names = [a for a in os.listdir(str(arts)) if not a.startswith('.')]
+    person_names = [p.replace(' ', '_') for p in person_names if not p.startswith('.')]
+    for n in person_names:
+        print(f'Processing {n}')
+        a_plots = [np.ones((512, 512, 3), dtype=np.uint8) * 255]
+        for an in art_names:
+            art_path = sample(list((arts / an).glob('*.png')), 1)
+            art_sample = cv2.resize(cv2.imread(str(art_path[0])), (0, 0), fx=2, fy=2)
+            a_plots.append(art_sample)
+        a_plots = np.hstack(a_plots)
+        plots = [a_plots]
+        nps = path / art_names[0] / 'warp' / n
+        if not nps.exists():
+            continue
+        photo_names = [p for p in os.listdir(nps) if not p.startswith('.')]
+        for w in photo_names:
+            oi = cv2.imread(str(original / n.replace('_', ' ') / (os.path.splitext(w)[0] + fmt)))
+            h_plots = [oi]
+            for an in art_names:
+                h_plots.append(cv2.imread(str(path / an / 'warp' / n / w)))
+            h_plots = np.hstack(h_plots)
+            plots.append(h_plots)
+            if (i + 1) % 10 == 0:
+                plots = np.vstack(plots)
+                output_name = output / n
+                output_name.mkdir(exist_ok=True, parents=True)
+                cv2.imwrite(str(output_name / f'{str(i)}.png'), plots)
+                plots = [a_plots]
+            i += 1
 
 
 def ablation():
@@ -1018,10 +1141,11 @@ def ablation():
     cmp_output = Path(f'output/ablation/{time_stamp}/cmp')
     record_output = Path(f'output/ablation/{time_stamp}/record')
     use_web_cari = False
-    warp_ablation(web_cari_path, [1, 5, 15, 20], 1, 0, landmarks_num, warped_output, cmp_output, record_output,
-                  random_sample_times=2, scale=scale, scale_to_old=scale_to_old, fmt='.bmp')
-    # warp_ablation2(web_cari_path, [1, 5, 15, 20], 1, 0, landmarks_num, warped_output, cmp_output, record_output,
-    #                random_sample_times=2, scale=scale, scale_to_old=scale_to_old, fmt='.bmp')
+    # warp_ablation(web_cari_path, [1, 5, 15, 20], 1, 0, landmarks_num, warped_output, cmp_output, record_output,
+    #               random_sample_times=2, scale=scale, scale_to_old=scale_to_old, fmt='.bmp')
+    warp_ablation2(web_cari_path, [1, 5, 15, 20], 1, 0, landmarks_num, warped_output, cmp_output, record_output,
+                   random_sample_times=2, scale=scale, scale_to_old=scale_to_old, fmt='.bmp', train_cari_scale=2,
+                   train_face_scale=2, test_scale=2)
     # warp_fixed(web_cari_path, 100, 1000, 0, landmarks_num, warped_output, cmp_output, record_output,
     #            random_sample_times=2, fmt='.bmp')
     # result_path = Path(f'/Users/luvletteru/Documents/GitHub/facepp-python-sdk/output/ablation/{time_stamp}')
@@ -1032,35 +1156,55 @@ def ablation():
 
 
 def random_warp():
-    web_cari_path = Path('datasets/WebCari-bmp')
     celeb_path = Path('datasets/CelebA')
-    web_test_path = Path('datasets/WebCariTest-bmp')
     cari_train_path = Path('datasets/WebCari_104')
+    web_cari_path = Path('datasets/WebCari_512')
+    web_test_path = Path('datasets/WebCariTest_512')
+    fmt = '.jpg'
+    # fmt = '.bmp'
+    # web_cari_path = Path('datasets/WebCari-bmp')
+    # web_test_path = Path('datasets/WebCariTest-bmp')
+
     train_face_num = 1000
-    train_cari_num = 500
+    train_cari_num = 2000
     compress_face_distribution = True
     compress_cari_distribution = True
     scale = 1
     scale_to_old = True
+    train_face_scale = 1
+    test_scale = 1
+    train_cari_scale = 1
     device_id = 0
     landmarks_num = 128
-    time_stamp = generate_time_stamp()
-    # time_stamp = '04171006'
-    if scale_to_old:
-        warped_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/warp')
-        cmp_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/cmp')
-        record_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/record')
-        record_output.mkdir(exist_ok=True, parents=True)
-    else:
-        warped_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}_r/warp')
-        cmp_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}_r/cmp')
-        record_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/record')
-        record_output.mkdir(exist_ok=True, parents=True)
-    warp_use_test(web_cari_path, web_test_path, train_face_num, train_cari_num, 0, landmarks_num, warped_output,
-                  cmp_output, record_output,
-                  compress_face_distribution=compress_face_distribution,
-                  compress_cari_distribution=compress_cari_distribution, scale=scale, scale_to_old=scale_to_old,
-                  cari_train_path=cari_train_path, train_face_scale=2, test_scale=2, draw_pts=False)
+    # train_cari_nums = [20, 40, 60, 80, 100, 100, 500, 1000, 2000]
+    train_cari_nums = [100]
+    # time_stamps = ['04181538', '04181539', '04181541', '04181542', '04181543']
+    time_stamps = []
+    for idx, train_cari_num in enumerate(train_cari_nums):
+        if idx < len(time_stamps):
+            time_stamp = time_stamps[idx]
+        else:
+            time_stamp = generate_time_stamp()
+        # time_stamp = '04171006'
+        if scale_to_old:
+            warped_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/warp')
+            cmp_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/cmp')
+            record_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/record')
+            record_output.mkdir(exist_ok=True, parents=True)
+        else:
+            warped_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}_r/warp')
+            cmp_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}_r/cmp')
+            record_output = Path(f'output/random/{time_stamp}_{train_face_num}_{train_cari_num}_{scale}/record')
+            record_output.mkdir(exist_ok=True, parents=True)
+
+        warp_use_test(web_cari_path, web_test_path, train_face_num, train_cari_num, 0, landmarks_num, warped_output,
+                      cmp_output, record_output,
+                      compress_face_distribution=compress_face_distribution,
+                      compress_cari_distribution=compress_cari_distribution, scale=scale, scale_to_old=scale_to_old,
+                      cari_train_path=cari_train_path, train_face_scale=train_face_scale, test_scale=test_scale,
+                      train_cari_scale=train_cari_scale, draw_pts=False,
+                      fmt=fmt)
+        time_stamps.append(time_stamp)
 
     # test_path = Path('datasets/CelebA_contents')
     # train_face_num = 500
@@ -1076,6 +1220,46 @@ def random_warp():
     #                         scale_to_old=scale_to_old, draw_pts=True, face_scale=0.5, cari_scale=2, use_web_cari=False,
     #                         load_from_file=load_from_file)
 
-    if __name__ == '__main__':
-        # ablation()
-        random_warp()
+
+def articts():
+    celeb_path = Path('datasets/CelebA')
+    web_cari_path = Path('datasets/WebCari_512')
+    web_test_path = Path('datasets/WebCariTest_512')
+    # at_names = ['Amedeo_Modigliani', 'Comics', 'Egon_Schiele', 'Fernand_Leger']
+    # at_names = ['Amedeo_Modigliani']
+    at_names = os.listdir(str('datasets/Articst-faces/img'))
+    print(at_names)
+    landmarks_num = 128
+    train_face_num = 1000
+    for name in at_names:
+        warped_output = Path(f'output/articts/{name}/warp')
+        cmp_output = Path(f'output/articts/{name}/cmp')
+        cari_train_path = Path(f'datasets/Articst-faces/img/{name}')
+        articts_landmarks_path = Path(f'datasets/Articst-faces/landmarks/{str(landmarks_num)}/{name}')
+        # record_output = Path(f'output/articts/{name}/record')
+        warp_articst_faces(web_cari_path, web_test_path, cari_train_path, train_face_num, articts_landmarks_path, 0,
+                           landmarks_num,
+                           warped_output,
+                           cmp_output)
+
+
+if __name__ == '__main__':
+    # ablation()
+    # random_warp()
+    # articts()
+    # cat_cmp([
+    #     Path(f'output/random/04191450_1000_20_1/warp'),
+    #     Path(f'output/random/04191501_1000_40_1/warp'),
+    #     Path(f'output/random/04191508_1000_60_1/warp'),
+    #     Path(f'output/random/04191514_1000_80_1/warp'),
+    #     Path(f'output/random/04191628_1000_100_1/warp'),
+    #     Path(f'output/random/04191521_1000_100_1/warp'),
+    #     Path(f'output/random/04191530_1000_100_1/warp'),
+    #     Path(f'output/random/04191541_1000_500_1/warp'),
+    #     Path(f'output/random/04191556_1000_1000_1/warp'),
+    #     Path(f'output/random/04191608_1000_2000_1/warp')],
+    #     Path('datasets/WebCari_512/img'),
+    #     Path(f'output/random_cmp/{generate_time_stamp()}'))
+    cat_art(Path('output/articts'), Path('datasets/WebCari_512/img'), os.listdir('datasets/WebCariTest_512/img'),
+            Path('datasets/Articst-faces/img'),
+            Path(f'output/art_cmp/{generate_time_stamp()}'))
