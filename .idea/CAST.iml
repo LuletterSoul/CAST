@@ -2,9 +2,9 @@
 <module type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
-      <excludeFolder url="file://$MODULE_DIR$/../facepp-python-sdk/WebCari" />
       <excludeFolder url="file://$MODULE_DIR$/datasets" />
       <excludeFolder url="file://$MODULE_DIR$/output" />
+      <excludeFolder url="file://$MODULE_DIR$/../facepp-python-sdk/WebCari" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.8 (dol)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

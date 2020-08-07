@@ -12,15 +12,14 @@
 """
 import multiprocessing as mp
 import os
+import shutil
 import time
 from pathlib import Path
 from random import sample
 
 import cv2
-import shutil
 import numpy as np
 import torch
-
 from utils.wct import whiten_and_color, warp_image, draw_key_points, whiten_and_color_mu
 
 
@@ -801,6 +800,203 @@ def warp_use_test(web_cari_path: Path, web_cari_test_path: Path, train_face_num,
         p.starmap(wct_task, pairs)
 
 
+def warp_single_test(web_cari_path: Path, train_photo_num, train_cari_num,
+                     test_photo_num, test_cari_num, output_path,
+                     fmt='.jpg', web_test_photo_path=None, web_test_cari_path=None):
+    """
+    单漫画形变迁移
+    :param web_cari_path:
+    :param train_photo_num:
+    :param train_cari_num:
+    :param test_photo_num:
+    :param test_cari_num:
+    :param output_path:
+    :param fmt:
+    :param web_test_photo_path:
+    :param web_test_cari_path:
+    :return:
+    """
+    device = 'cuda:' + str(device_id) if torch.cuda.is_available() else 'cpu'
+
+    Path(output_path).mkdir(exist_ok=True, parents=True)
+    # use default file layout
+    web_cari_photo_path = web_cari_path / 'img'
+    web_cari_landmarks_path = web_cari_path / 'landmarks' / str(128)
+    photo_paths = list(web_cari_photo_path.glob(f'*/P*{fmt}'))
+    cari_paths = list(web_cari_photo_path.glob(f'*/C*{fmt}'))
+
+    # shuffles the datasets
+    np.random.shuffle(photo_paths)
+    np.random.shuffle(cari_paths)
+
+    train_photo_paths = sample(photo_paths, train_photo_num)
+    train_cari_paths = sample(cari_paths, train_cari_num)
+
+    if web_test_photo_path is not None:
+        test_photo_paths = list(Path(web_test_photo_path).glob('P*'))
+        # test_photo_paths = [web_test_photo_path]
+    else:
+        test_photo_paths = sample(photo_paths, test_photo_num)
+
+    if web_test_cari_path is not None:
+        # test_cari_paths = list(Path(web_test_cari_path).glob('*'))
+        test_cari_paths = [web_test_cari_path]
+    else:
+        test_cari_paths = sample(cari_paths, test_cari_num)
+
+    print(f'Photo num {len(train_photo_paths)}')
+    print(f'Cari num {len(train_cari_paths)}')
+
+    train_face_landmarks, train_face_paths = load_landmarks(train_photo_paths, web_cari_landmarks_path)
+    train_cari_landmarks, train_cari_paths = load_landmarks(train_cari_paths, web_cari_landmarks_path)
+
+    train_photo_num = len(train_face_paths)
+    train_cari_num = len(train_cari_paths)
+
+    train_photo_tensors = cvt_landmarks_distribution(device, train_photo_num, train_face_landmarks)
+    train_cari_tensors = cvt_landmarks_distribution(device, train_cari_num, train_cari_landmarks)
+
+    photo_mean = torch.mean(train_photo_tensors, 1)  # c x (h x w)
+    cari_mean = torch.mean(train_cari_tensors, 1)
+
+    for idx, photo_path in enumerate(test_photo_paths):
+        test_face_landmark, test_face_path = load_landmarks([photo_path], web_cari_landmarks_path)
+        test_cari_landmark, test_cari_path = load_landmarks([test_cari_paths[idx]], web_cari_landmarks_path)
+        if not len(test_face_path) or not len(test_cari_path):
+            continue
+
+        test_photo_tensor = cvt_landmarks_distribution(device, 1, test_face_landmark)
+        test_cari_tensor = cvt_landmarks_distribution(device, 1, test_cari_landmark)
+
+        print(test_photo_tensor.size())
+        print(test_cari_tensor.size())
+        wct_landmark_1, test_wct_landmark_1 = whiten_and_color(test_photo_tensor, test_cari_tensor,
+                                                               test_photo_tensor, use_mean=True)
+        wct_landmark_2, test_wct_landmark_2 = whiten_and_color(test_photo_tensor, test_cari_tensor,
+                                                               test_photo_tensor, photo_mean, cari_mean)
+        face = cv2.imread(str(photo_path))
+        cari = cv2.imread(str(test_cari_path[0]))
+
+        test_face_landmark = test_face_landmark.reshape((1, 128, 2))
+        test_wct_landmark_1 = test_wct_landmark_1.permute(1, 0).view(1, 128, 2).long().cpu().numpy()
+        test_wct_landmark_2 = test_wct_landmark_2.permute(1, 0).view(1, 128, 2).long().cpu().numpy()
+        warped_1, transform = warp_image(face, test_face_landmark[0], test_wct_landmark_1[0])
+        warped_2, transform = warp_image(face, test_face_landmark[0], test_wct_landmark_2[0])
+        # warped, transform = warp_image(face, wct_landmark, face_landmark)
+        # convert to uint8 format image
+
+        cari = draw_key_points(cari, test_cari_landmark[0])
+        warped_1 = (warped_1 * 255).astype(np.uint8)
+        warped_2 = (warped_2 * 255).astype(np.uint8)
+        output = np.hstack([face, cari, warped_1, warped_2])
+        cv2.imwrite(f'{output_path}/{idx}.png', output)
+
+
+def warp_interplation(web_cari_path: Path, train_photo_num, train_cari_num,
+                      test_photo_num, test_cari_num, output_path,
+                      fmt='.jpg', web_test_photo_path=None, web_test_cari_path=None):
+    """
+    形变线性插值实验
+    :param web_cari_path:
+    :param train_photo_num:
+    :param train_cari_num:
+    :param test_photo_num:
+    :param test_cari_num:
+    :param output_path:
+    :param fmt:
+    :param web_test_photo_path:
+    :param web_test_cari_path:
+    :return:
+    """
+    device = 'cuda:' + str(device_id) if torch.cuda.is_available() else 'cpu'
+
+    Path(output_path).mkdir(exist_ok=True, parents=True)
+    # use default file layout
+    web_cari_photo_path = web_cari_path / 'img'
+    web_cari_landmarks_path = web_cari_path / 'landmarks' / str(128)
+    photo_paths = list(web_cari_photo_path.glob(f'*/P*{fmt}'))
+    cari_paths = list(web_cari_photo_path.glob(f'*/C*{fmt}'))
+
+    # shuffles the datasets
+    np.random.shuffle(photo_paths)
+    np.random.shuffle(cari_paths)
+
+    train_photo_paths = sample(photo_paths, train_photo_num)
+    train_cari_paths = sample(cari_paths, train_cari_num)
+
+    if web_test_photo_path is not None:
+        test_photo_paths = list(Path(web_test_photo_path).glob('P*'))
+        # test_photo_paths = [web_test_photo_path]
+    else:
+        test_photo_paths = sample(photo_paths, test_photo_num)
+
+    if web_test_cari_path is not None:
+        # test_cari_paths = list(Path(web_test_cari_path).glob('*'))
+        test_cari_paths = [web_test_cari_path]
+    else:
+        test_cari_paths = sample(cari_paths, test_cari_num)
+
+    print(f'Photo num {len(train_photo_paths)}')
+    print(f'Cari num {len(train_cari_paths)}')
+
+    train_face_landmarks, train_face_paths = load_landmarks(train_photo_paths, web_cari_landmarks_path)
+    train_cari_landmarks, train_cari_paths = load_landmarks(train_cari_paths, web_cari_landmarks_path)
+
+    train_photo_num = len(train_face_paths)
+    train_cari_num = len(train_cari_paths)
+
+    train_photo_tensors = cvt_landmarks_distribution(device, train_photo_num, train_face_landmarks)
+    train_cari_tensors = cvt_landmarks_distribution(device, train_cari_num, train_cari_landmarks)
+
+    photo_mean = torch.mean(train_photo_tensors, 1)  # c x (h x w)
+    cari_mean = torch.mean(train_cari_tensors, 1)
+
+    weights = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+    for idx, photo_path in enumerate(test_photo_paths):
+        if idx > len(test_photo_paths) - 1:
+            break
+        test_face_landmark, test_face_path = load_landmarks([test_photo_paths[idx]], web_cari_landmarks_path)
+        test_cari_landmark, test_cari_path = load_landmarks([test_cari_paths[idx]], web_cari_landmarks_path)
+        test_cari_landmark_2, test_cari_path_2 = load_landmarks([test_cari_paths[idx + 1]], web_cari_landmarks_path)
+        if not len(test_face_path) or not len(test_cari_path) or not len(test_cari_path_2):
+            continue
+
+        test_photo_tensor = cvt_landmarks_distribution(device, 1, test_face_landmark)
+        test_cari_tensor = cvt_landmarks_distribution(device, 1, test_cari_landmark)
+        test_cari_tensor_2 = cvt_landmarks_distribution(device, 1, test_cari_landmark_2)
+
+        print(test_photo_tensor.size())
+        print(test_cari_tensor.size())
+        wct_landmark_1, test_wct_landmark_1 = whiten_and_color(test_photo_tensor, test_cari_tensor,
+                                                               test_photo_tensor, use_mean=True)
+        wct_landmark_2, test_wct_landmark_2 = whiten_and_color(test_photo_tensor, test_cari_tensor_2,
+                                                               test_photo_tensor, use_mean=True)
+        face = cv2.imread(str(photo_path))
+        cari_1 = cv2.imread(str(test_cari_path[0]))
+        cari_2 = cv2.imread(str(test_cari_path_2[0]))
+
+        test_face_landmark = test_face_landmark.reshape((1, 128, 2))
+        test_wct_landmark_1 = test_wct_landmark_1.permute(1, 0).view(1, 128, 2).long().cpu().numpy()
+        test_wct_landmark_2 = test_wct_landmark_2.permute(1, 0).view(1, 128, 2).long().cpu().numpy()
+
+        warped_1, transform = warp_image(face, test_face_landmark[0], test_wct_landmark_1[0])
+        warped_2, transform = warp_image(face, test_face_landmark[0], test_wct_landmark_2[0])
+        warped_1 = (warped_1 * 255).astype(np.uint8)
+        warped_2 = (warped_2 * 255).astype(np.uint8)
+        output = [face, cari_1, warped_1]
+
+        for w in weights:
+            test_wct_landmark = (1 - w) * test_wct_landmark_1 + w * test_wct_landmark_2
+            warped, transform = warp_image(face, test_face_landmark[0], test_wct_landmark[0])
+            warped = (warped * 255).astype(np.uint8)
+            output.append(warped)
+        output.append(warped_2)
+        output.append(cari_2)
+        output = np.hstack(output)
+        cv2.imwrite(f'{output_path}/{idx}.png', output)
+
+
 def sample_normal_distribution(names, sample_per_person, k, web_cari_path, fmt='P*'):
     paths = []
     photos_of_person = {}
@@ -1177,7 +1373,7 @@ def random_warp():
     device_id = 0
     landmarks_num = 128
     # train_cari_nums = [20, 40, 60, 80, 100, 100, 500, 1000, 2000]
-    train_cari_nums = [100]
+    train_cari_nums = [1]
     # time_stamps = ['04181538', '04181539', '04181541', '04181542', '04181543']
     time_stamps = []
     for idx, train_cari_num in enumerate(train_cari_nums):
@@ -1243,10 +1439,18 @@ def articts():
                            cmp_output)
 
 
+def single_shape_exp():
+    web_cari_path = Path('datasets/WebCari_512')
+    # warp_single_test(web_cari_path, 1000, 500, 100, 100, f'output/random/{generate_time_stamp()}')
+    # warp_single_test(web_cari_path, 10, 10, 100, 100, f'output/random/{generate_time_stamp()}')
+    warp_interplation(web_cari_path, 10, 10, 100, 100, f'output/random/{generate_time_stamp()}')
+
+
 if __name__ == '__main__':
     # ablation()
     # random_warp()
     # articts()
+    single_shape_exp()
     # cat_cmp([
     #     Path(f'output/random/04191450_1000_20_1/warp'),
     #     Path(f'output/random/04191501_1000_40_1/warp'),
@@ -1260,6 +1464,6 @@ if __name__ == '__main__':
     #     Path(f'output/random/04191608_1000_2000_1/warp')],
     #     Path('datasets/WebCari_512/img'),
     #     Path(f'output/random_cmp/{generate_time_stamp()}'))
-    cat_art(Path('output/articts'), Path('datasets/WebCari_512/img'), os.listdir('datasets/WebCariTest_512/img'),
-            Path('datasets/Articst-faces/img'),
-            Path(f'output/art_cmp/{generate_time_stamp()}'))
+    # cat_art(Path('output/articts'), Path('datasets/WebCari_512/img'), os.listdir('datasets/WebCariTest_512/img'),
+    #         Path('datasets/Articst-faces/img'),
+    #         Path(f'output/art_cmp/{generate_time_stamp()}'))
