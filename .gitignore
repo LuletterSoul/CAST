@@ -1,0 +1,9 @@
+*.pyc
+*.swp
+datasets/
+imgResource/
+data
+output
+.idea
+.vscode
+.DS_Store
